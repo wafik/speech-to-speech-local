@@ -3,8 +3,19 @@
 PS := powershell -NoProfile -ExecutionPolicy Bypass -File run.ps1
 VENV := speech-to-speech/.venv/Scripts/python.exe
 
+# Full-SGLang stack runs inside WSL (Ubuntu-2). scripts/wsl.sh lives on the
+# Windows side; WSL_RUN copies it to ext4 and runs it there (executing straight
+# off 9p is slow and mangles permissions). MSYS_NO_PATHCONV keeps Git Bash from
+# rewriting the /root paths into C:/Program Files/...
+WSL_DISTRO := Ubuntu-2
+# This checkout is on E:. Override if you move it: make wsl WSL_WIN_PATH=/mnt/d/x
+WSL_WIN_PATH ?= /mnt/e/test/spech-to-spech
+WSL_RUN = MSYS_NO_PATHCONV=1 wsl.exe -d $(WSL_DISTRO) bash -c \
+	"cp $(WSL_WIN_PATH)/scripts/wsl.sh /root/wsl.sh && bash /root/wsl.sh $(1)"
+
 .DEFAULT_GOAL := run
-.PHONY: run english 4b 9b serve multi indo indo-serve setup models stop help
+.PHONY: run english 4b 9b serve multi indo indo-serve setup models stop help \
+        wsl wsl-setup wsl-status wsl-stop
 
 run:            ## Start a voice session (Qwen3-ASR + gemma4:e4b + Supertonic)
 	$(PS)
@@ -48,6 +59,21 @@ models:         ## Show installed Ollama models, VRAM, and audio devices
 stop:           ## Kill a running session
 	taskkill //F //IM speech-to-speech.exe
 
+# --- Full SGLang stack, all inside WSL -------------------------------------
+# Copies scripts/wsl.sh to /root and runs it there: one file, no drift between
+# the repo copy and the one WSL executes.
+wsl:            ## All-SGLang stack in WSL (ASR+LLM on GPU, TTS on CPU) + browser UI
+	$(call WSL_RUN,serve)
+
+wsl-setup:      ## One-time WSL setup: venvs, models, UI page
+	$(call WSL_RUN,setup)
+
+wsl-status:     ## What is listening in WSL, plus VRAM
+	$(call WSL_RUN,status)
+
+wsl-stop:       ## Stop every WSL process from `make wsl`
+	$(call WSL_RUN,stop)
+
 help:
 	@echo "make             run (Qwen3-ASR + gemma4:e4b + Supertonic, auto language)"
 	@echo "make english     English only: Parakeet + Kokoro (lower latency)"
@@ -58,3 +84,7 @@ help:
 	@echo "make setup       install everything from scratch"
 	@echo "make models      list models / VRAM / audio devices"
 	@echo "make stop        kill running session"
+	@echo "make wsl         full-SGLang stack in WSL + browser UI on :7860"
+	@echo "make wsl-setup   one-time WSL setup (venvs, models)"
+	@echo "make wsl-status  what is up in WSL"
+	@echo "make wsl-stop    stop the WSL stack"

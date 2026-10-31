@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Speech to Speech</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center;
+         font:16px/1.5 system-ui,sans-serif; background:#111; color:#eee; }
+  main { width:min(640px,92vw); }
+  button { font:inherit; padding:.8rem 1.4rem; border-radius:.6rem; border:0;
+           background:#3b82f6; color:#fff; cursor:pointer; }
+  button:disabled { background:#333; color:#777; cursor:default; }
+  #status { margin:1rem 0; color:#888; }
+  .row { border-top:1px solid #262626; padding:.7rem 0; }
+  .who { font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; color:#666; }
+  .txt { white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1 style="font-size:1.3rem">Speech to Speech</h1>
+  <button id="go">Mulai bicara</button>
+  <div id="status">Siap.</div>
+  <div id="log"></div>
+</main>
+<script type="module">
+// Talks to the RealTime WS directly: 16 kHz PCM16 up, 16 kHz PCM16 down.
+// No SDK, no bundler - the whole protocol this demo needs is ~60 lines.
+const WS = `ws://${location.hostname}:8765/v1/realtime`;
+const $ = (s) => document.querySelector(s);
+
+let ws, inCtx, outCtx, stream, node, nextAt = 0, running = false;
+
+function status(s) { $("#status").textContent = s; }
+
+function line(who, text) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `<div class="who">${who}</div><div class="txt"></div>`;
+  row.querySelector(".txt").textContent = text;
+  $("#log").prepend(row);
+  return row.querySelector(".txt");
+}
+
+function b64(bytes) {
+  let s = "";
+  const a = new Uint8Array(bytes);
+  for (let i = 0; i < a.length; i += 0x8000)
+    s += String.fromCharCode(...a.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function unb64(str) {
+  const bin = atob(str), out = new Int16Array(bin.length / 2);
+  for (let i = 0; i < out.length; i++)
+    out[i] = bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8);
+  return out;
+}
+
+// Playback: responses arrive as 16 kHz PCM16 deltas; queue them gaplessly.
+function play(int16) {
+  if (!outCtx) outCtx = new AudioContext({ sampleRate: 16000 });
+  const buf = outCtx.createBuffer(1, int16.length, 16000);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < int16.length; i++) ch[i] = int16[i] / 32768;
+  const src = outCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(outCtx.destination);
+  const at = Math.max(outCtx.currentTime, nextAt);
+  src.start(at);
+  nextAt = at + buf.duration;
+}
+
+async function start() {
+  $("#go").disabled = true;
+  line("you", "");
+  status("menghubungkan...");
+
+  ws = new WebSocket(WS);
+  ws.onclose = () => { status("terputus."); $("#go").disabled = false; running = false; };
+  ws.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    switch (ev.type) {
+      case "input_audio_buffer.speech_started": status("mendengar..."); break;
+      case "response.created": status("berpikir..."); break;
+      case "response.output_audio.delta": play(unb64(ev.delta)); status("berbicara..."); break;
+      case "response.done": status("siap."); break;
+      case "error": status("error: " + (ev.error?.message || JSON.stringify(ev))); break;
+    }
+  };
+
+  await new Promise((ok, err) => { ws.onopen = ok; ws.onerror = err; });
+
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+  });
+  inCtx = new AudioContext({ sampleRate: 16000 });
+  await inCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([`
+    class Tap extends AudioWorkletProcessor {
+      process(inputs) {
+        const ch = inputs[0][0];
+        if (ch) this.port.postMessage(new Float32Array(ch));
+        return true;
+      }
+    }
+    registerProcessor("tap", Tap);
+  `], { type: "text/javascript" })));
+
+  const src = inCtx.createMediaStreamSource(stream);
+  node = new AudioWorkletNode(inCtx, "tap");
+  node.port.onmessage = ({ data }) => {
+    if (!running || ws.readyState !== 1) return;
+    const pcm = new Int16Array(data.length);
+    for (let i = 0; i < data.length; i++)
+      pcm[i] = Math.max(-1, Math.min(1, data[i])) * 32767;
+    ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64(pcm.buffer) }));
+  };
+  src.connect(node);
+
+  running = true;
+  status("bicara sekarang - saya dengar.");
+}
+
+$("#go").onclick = () => start().catch((e) => status("gagal: " + e.message));
+</script>
+</body>
+</html>

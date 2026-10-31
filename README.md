@@ -11,6 +11,9 @@ choices that actually fit in 16 GB, and the benchmarks behind those choices.
 mic -> Silero VAD -> Qwen3-ASR -> gemma4:e4b (Ollama) -> Supertonic -> speaker
 ```
 
+There is also a [full-SGLang variant](#full-sglang-all-inside-wsl) that runs the
+same pipeline entirely inside WSL, for comparison.
+
 | Stage | Default | Why |
 |---|---|---|
 | VAD | Silero v5 | upstream default, 16 kHz |
@@ -63,6 +66,76 @@ make stop         # kill a running session
 
 `run.ps1` also takes `-Online` to allow Hugging Face network calls; the default
 is fully offline once the checkpoints are cached.
+
+## Full SGLang (all inside WSL)
+
+The Ollama stack above is the reference. This second stack replaces every GPU
+stage with SGLang and runs entirely in WSL — same upstream pipeline, different
+serving layer, so you can compare them side by side.
+
+```
+mic -> Silero VAD -> SGLang :8000  Qwen3-ASR-0.6B
+                 -> SGLang :30000 gemma-4-E4B int4 (W4A16 QAT)
+                 -> Supertonic (CPU, 66M) -> speaker
+```
+
+| Service | Port | Notes |
+|---|---|---|
+| Qwen3-ASR | 8000 | `/v1/audio/transcriptions`, chunked streaming adapter |
+| gemma-4-E4B | 30000 | 4-bit QAT, `--reasoning_effort none` |
+| pipeline | 8765 | `ws://127.0.0.1:8765/v1/realtime`, 3 slots |
+| browser UI | 7860 | click, allow the mic, talk |
+
+```bash
+make wsl-setup   # once: two venvs, ~30 GB of weights, UI page
+make wsl         # start everything, prints the UI URL
+make wsl-status  # ports + VRAM + loaded model ids
+make wsl-stop    # stop all four
+```
+
+Then open <http://localhost:7860/>.
+
+**Two venvs are mandatory.** `speech-to-speech` pins `openai==2.28.0`; SGLang
+0.5.22 pins `openai==2.6.1`. They cannot share an environment.
+
+**VRAM, 16 GB card:**
+
+| | Weights | KV | Total |
+|---|---|---|---|
+| Qwen3-ASR 0.6B bf16 | 1.57 GB | 0.54 GB | ~2.1 GB |
+| gemma-4-E4B W4A16 | 12.87 GB | 0.32 GB | ~13.2 GB |
+| Supertonic | — | — | CPU |
+
+That leaves ~1.5 GB. `gemma-4-E4B` at bf16 is **16 GB** and does not fit
+alongside ASR — use the QAT checkpoint. `--mem-fraction-static` must be 0.90
+for the LLM and 0.15 for ASR; lower values leave no room for the KV pool.
+
+Three things SGLang gets wrong out of the box, all handled in `scripts/wsl.sh`:
+
+1. **`Qwen3-ASR-0.6B-hf` is not loadable.** Its `config.json` is flat
+   (`audio_config`/`text_config` at top level) but SGLang's `Qwen3ASRConfig`
+   reads `thinker_config`. It silently falls back to a default `Qwen3Config`
+   (4096 hidden, 32 layers), tries to allocate ~14.8 GB, and dies on the KV
+   cache. Use `Qwen/Qwen3-ASR-0.6B`, not the `-hf` mirror.
+2. **The 4-bit gemma checkpoint crashes on load.** Its audio tower is fully
+   listed in the checkpoint's quant `ignore` list, but `gemma4_mm.py` still
+   passes `quant_config` down, so `ClippableGLUParallelLinear` builds a
+   wrapper with no `.weight`. The script patches that call site to
+   `quant_config=None` (idempotent, one file).
+3. **Start the servers serially.** Both load into the same 16 GB; racing them
+   OOMs ASR.
+
+Measured on the same Indonesian clip (4.8 s in):
+
+| | Ollama stack | Full SGLang |
+|---|---|---|
+| STT | 136 ms | 170 ms |
+| LLM | — | 420 to 630 ms |
+| Reply audio | — | 8 s |
+
+Both pipelines are the same code, so the only real difference is the serving
+layer. The Ollama path stays the default because it needs no WSL, no second
+venv, and no source patch.
 
 ## OpenAI-compatible API
 

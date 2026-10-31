@@ -8,6 +8,8 @@ bench/audio_*.wav
 bench/test.tsv
 bench/bench_result.json
 _bench/
+# demo assets, copied into the WSL UI dir by `make wsl-setup`
+ui/test_id.wav
 # tooling noise
 .claude-flow/
 .venv/
