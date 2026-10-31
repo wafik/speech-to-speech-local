@@ -1,0 +1,16 @@
+# upstream clone - not ours to commit
+speech-to-speech/
+# separate repo, unrelated
+raycodes/
+# benchmark artifacts: clips, references, results
+bench/audio/
+bench/audio_*.wav
+bench/test.tsv
+bench/bench_result.json
+_bench/
+# tooling noise
+.claude-flow/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
