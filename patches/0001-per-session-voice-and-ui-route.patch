@@ -109,7 +109,7 @@ index 4e1ad03..f7fb428 100644
          )
  
 diff --git a/src/speech_to_speech/api/openai_realtime/websocket_router.py b/src/speech_to_speech/api/openai_realtime/websocket_router.py
-index f98c908..6150f06 100644
+index f98c908..6034581 100644
 --- a/src/speech_to_speech/api/openai_realtime/websocket_router.py
 +++ b/src/speech_to_speech/api/openai_realtime/websocket_router.py
 @@ -1,5 +1,7 @@
@@ -293,3 +293,28 @@ index f98c908..6150f06 100644
          now = time.monotonic()
  
          def _state(u: PipelineUnit) -> dict[str, Any]:
+@@ -760,6 +877,11 @@ def create_app(
+         events flow over the 'oai-events' data channel using the same JSON
+         protocol as the WebSocket transport.
+         """
++        # Same gate as the socket: WebRTC is a second way in, so leaving it
++        # open would let anyone with the hostname claim both pipeline slots.
++        if (denied := _check_http_access(request)) is not None:
++            return denied
++
+         if not WEBRTC_AVAILABLE:
+             return Response(
+                 content="WebRTC support requires the 'webrtc' extra: pip install 'speech-to-speech[webrtc]'",
+@@ -875,8 +997,11 @@ def create_app(
+         )
+ 
+     @app.delete("/v1/realtime/calls/{call_id}")
+-    async def webrtc_hangup_endpoint(call_id: str) -> Response:
++    async def webrtc_hangup_endpoint(call_id: str, request: Request) -> Response:
+         """Hang up a WebRTC call — the Location URL advertised by the POST above."""
++        if (denied := _check_http_access(request)) is not None:
++            return denied
++
+         for unit in pool:
+             session = unit.session
+             if (

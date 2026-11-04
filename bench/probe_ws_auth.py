@@ -88,6 +88,15 @@ async def main():
     results.append(("GET /v1/pool with token", r.status_code == 200, True))
     print(f"GET /v1/pool with token       -> {r.status_code}")
 
+    # WebRTC is a second way into the same pipeline slots. Ungated it returns
+    # 201 with an SDP answer to anyone who posts a valid offer; gated it must
+    # answer 401 before the offer is even parsed.
+    for method, path in (("POST", "/v1/realtime/calls"), ("DELETE", "/v1/realtime/calls/x")):
+        r = requests.request(method, f"{HTTP}{path}", data="v=0",
+                             headers={"Content-Type": "application/sdp"}, timeout=10)
+        results.append((f"{method} {path}", r.status_code == 401, True))
+        print(f"{method:6s} {path:24s} -> {r.status_code} (want 401)")
+
     bad = [name for name, got, want in results if got != want]
     if bad:
         print(f"\nFAIL: {', '.join(bad)}")
