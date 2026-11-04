@@ -1,0 +1,152 @@
+diff --git a/src/speech_to_speech/TTS/supertonic_tts_handler.py b/src/speech_to_speech/TTS/supertonic_tts_handler.py
+index 4e1ad03..f7fb428 100644
+--- a/src/speech_to_speech/TTS/supertonic_tts_handler.py
++++ b/src/speech_to_speech/TTS/supertonic_tts_handler.py
+@@ -18,6 +18,9 @@ from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+ logger = logging.getLogger(__name__)
+ 
+ PIPELINE_SAMPLE_RATE = 16000
++# Voices shipped with supertonic-3: 5 female, 5 male. A client's
++# session.update voice must be one of these or it is ignored.
++SUPERTONIC_VOICES = frozenset({"F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"})
+ SUPERTONIC_LANGUAGE_CODES = frozenset(
+     {
+         "ar",
+@@ -97,6 +100,12 @@ class SupertonicTTSHandler(BaseTTSHandler):
+ 
+         self.tts = TTS(auto_download=True)
+         self.voice_style = self.tts.get_voice_style(voice_name=self.voice)
++        # Session-selected voices are resolved per turn; the startup voice seeds the cache.
++        self._style_cache = {self.voice: self.voice_style}
++        # Voice is frozen per response: with sentence-by-sentence TTS a
++        # session.update landing between sentences would otherwise splice two
++        # voices into one answer.
++        self._response_voice: dict[str, str] = {}
+         logger.info("Loaded Supertonic TTS with voice %r", self.voice)
+         self.warmup()
+ 
+@@ -131,10 +140,73 @@ class SupertonicTTSHandler(BaseTTSHandler):
+         )
+         return self.lang
+ 
++    def _resolve_session_voice(self, tts_input: TTSIn) -> str:
++        """Voice for this turn: the response's own request, else session.update, else the startup voice.
++
++        Supertonic did not read runtime_config at all, so a client's
++        session.update (audio.output.voice) was acknowledged and then ignored -
++        the reply kept the voice the server started with. Kokoro already
++        resolves it this way; this mirrors that, minus the model-specific bits.
++        """
++        requested = None
++        response = getattr(tts_input, "response", None)
++        audio = getattr(response, "audio", None)
++        output = getattr(audio, "output", None)
++        requested = getattr(output, "voice", None)
++
++        if not requested:
++            runtime_config = getattr(tts_input, "runtime_config", None)
++            session = getattr(runtime_config, "session", None) if runtime_config is not None else None
++            audio_cfg = getattr(session, "audio", None)
++            output_cfg = getattr(audio_cfg, "output", None)
++            requested = getattr(output_cfg, "voice", None)
++
++        if not requested:
++            return self.voice
++
++        name = str(requested).strip().upper()
++        if name not in SUPERTONIC_VOICES:
++            logger.warning(
++                "Ignoring Supertonic voice %r: not one of %s",
++                requested,
++                ", ".join(sorted(SUPERTONIC_VOICES)),
++            )
++            return self.voice
++        return name
++
++    def _response_voice_for(self, tts_input: TTSInput) -> str:
++        """Freeze the voice on the response's first sentence, reuse it for the rest.
++
++        `_resolve_session_voice` reads the live session config, which changes the
++        instant a session.update lands. With `-LowLatency` (one sentence per TTS
++        call) that would splice two voices into one answer, so the first
++        sentence of a response decides the voice for all of it.
++        """
++        key = tts_input.response_key
++        if key is None:
++            return self._resolve_session_voice(tts_input)
++        name = self._response_voice.get(key)
++        if name is None:
++            name = self._resolve_session_voice(tts_input)
++            if len(self._response_voice) > 8:  # bounded: a dropped end never leaks
++                self._response_voice.clear()
++            self._response_voice[key] = name
++        return name
++
++    def _voice_style(self, name: str):
++        """Style JSON is small, but cache it: a turn should not re-read it per sentence."""
++        style = self._style_cache.get(name)
++        if style is None:
++            style = self.tts.get_voice_style(voice_name=name)
++            self._style_cache[name] = style
++        return style
++
+     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+         speculative_turns = getattr(self, "speculative_turns", None)
+ 
+         if isinstance(tts_input, EndOfResponse):
++            if tts_input.response_key is not None:
++                self._response_voice.pop(tts_input.response_key, None)
+             if speculative_turns and not speculative_turns.wait_for_gate(tts_input.turn_id, tts_input.turn_revision):
+                 if tts_input.response_key is None:
+                     return
+@@ -178,7 +250,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
+         wav, _duration = self.tts.synthesize(
+             text=text,
+             lang=lang,
+-            voice_style=self.voice_style,
++            voice_style=self._voice_style(self._response_voice_for(tts_input)),
+             speed=self.speed,
+         )
+ 
+diff --git a/src/speech_to_speech/api/openai_realtime/websocket_router.py b/src/speech_to_speech/api/openai_realtime/websocket_router.py
+index f98c908..4c6dc41 100644
+--- a/src/speech_to_speech/api/openai_realtime/websocket_router.py
++++ b/src/speech_to_speech/api/openai_realtime/websocket_router.py
+@@ -1,5 +1,6 @@
+ import asyncio
+ import logging
++import os
+ import time
+ from collections.abc import AsyncIterator
+ from contextlib import asynccontextmanager
+@@ -9,6 +10,7 @@ from typing import Any, Callable, TypeVar
+ 
+ import numpy as np
+ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
++from fastapi.responses import FileResponse
+ from openai.types.realtime import (
+     ConversationItemCreateEvent,
+     ConversationItemDeleteEvent,
+@@ -684,6 +686,22 @@ def create_app(
+             # can be skipped/cancelled by Starlette's runner and never resume.
+             _release_session(unit, session_id)
+ 
++    # The demo page lives here so one hostname serves both the page and the
++    # socket. A tunnel maps one hostname to one port, so a separate static
++    # server on another port would not be reachable behind it.
++    # A mount at "/" would shadow every route registered after it, so this is
++    # one explicit route for the single page the UI ships.
++    # SPEECH_UI_DIR is set by run.ps1; unset means no page, which is what a
++    # headless deployment wants.
++    _ui_dir = os.environ.get("SPEECH_UI_DIR")
++    _ui_index = os.path.join(_ui_dir, "index.html") if _ui_dir else None
++
++    if _ui_index and os.path.isfile(_ui_index):
++
++        @app.get("/", include_in_schema=False)
++        async def ui_index() -> FileResponse:
++            return FileResponse(_ui_index)
++
+     @app.get("/v1/realtime/capabilities")
+     async def capabilities_endpoint() -> dict[str, Any]:
+         return {

@@ -116,9 +116,14 @@ Lalu di dashboard Cloudflare Zero Trust: buat Access application untuk
 
 - Cloudflare memutus TLS di sisinya, jadi isi percakapan lewat jalur publik
   berakhir di Cloudflare sebelum masuk laptop. Untuk obrolan biasa wajar.
-- Sesi kedua sementara sesi pertama aktif mendapat `1008` dengan pesan
-  "All 1 session slots are in use". Web app sebaiknya menampilkan itu apa
-  adanya, bukan mencoba reconnect terus-menerus.
+- Server dijalankan dengan dua slot (`-Pipelines 2`), bukan satu: slot bekas
+  sesi yang baru ditutup masih tertahan ~1,4 detik, dan handler yang macet
+  dikarantina sampai 180 detik. Dengan satu slot, dua keadaan itu mengunci
+  satu-satunya pengguna keluar. Dua orang yang benar-benar bersamaan tetap
+  ditolak `1008` "All 2 session slots are in use" - itu disengaja.
+- Voice dibekukan per respons: `session.update` yang datang di tengah jawaban
+  berlaku untuk jawaban berikutnya, supaya satu jawaban tidak berpindah suara
+  di antara kalimat.
 
 ## Yang diserahkan ke pembangun
 

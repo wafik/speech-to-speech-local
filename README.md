@@ -292,10 +292,21 @@ mid-reply would splice two voices into one answer.
 
 Upstream's `SupertonicTTSHandler` did not read it at all — it acknowledged the
 update and kept the startup voice. `kokoro_handler.py` already resolves the
-voice per turn; the local patch mirrors that, so **it lives in the gitignored
-upstream clone and does not survive a fresh `git clone` or a `git pull` that
-touches that file.** Re-apply from `docs/superpowers/specs/` if the voice stops
-changing while `session.updated` still arrives.
+voice per turn; the local patch mirrors that. The voice is frozen per response:
+with sentence-by-sentence TTS a `session.update` landing mid-reply would
+otherwise change voice between sentences, so the first sentence decides and the
+switch applies to the next reply.
+
+`patches/0001-per-session-voice-and-ui-route.patch` holds the change (it also
+adds the `/` UI route). The upstream clone is gitignored, so the patch does not
+survive a fresh clone or a `git pull` that touches those files:
+
+```bash
+make patch      # re-apply it to speech-to-speech/ (idempotent)
+```
+
+If the voice stops changing while `session.updated` still arrives, that patch
+is the first thing to check.
 
 #### Serving it online
 

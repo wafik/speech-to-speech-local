@@ -16,7 +16,7 @@ WSL_RUN = MSYS_NO_PATHCONV=1 wsl.exe -d $(WSL_DISTRO) bash -c \
 
 .DEFAULT_GOAL := run
 .PHONY: run english 4b 9b serve multi indo indo-serve voice router setup setup-q4 setup-gguf models stop help \
-        stt hf wsl wsl-setup wsl-status wsl-stop router router-low tunnel
+        stt hf wsl wsl-setup wsl-status wsl-stop router router-low tunnel patch
 
 run:            ## Start a voice session (Qwen3-ASR Q5 GGUF + gemma4:e4b + Supertonic)
 	$(PS)
@@ -56,8 +56,11 @@ router:         ## Realtime server, LLM on 9router (9R_MODEL=..., optional 9R_KE
 # here because Supertonic runs on the same CPU the STT already saturates; the
 # low-latency flags stop the LLM writing three sentences before TTS starts.
 # No -EnableLlmProxy: this is the shape to run behind a tunnel.
+# Two slots, not one: a closed session holds its slot ~1.4 s, and a wedged
+# handler quarantines one for up to 180 s. With a single slot either case locks
+# the only user out. Two covers that without a third Supertonic instance.
 router-low:     ## `router` + low-latency tuning, text proxy off (tunnel-safe)
-	$(PS) -Mode serve -Model "$(9R_MODEL)" -ApiBase "$(9R_BASE)" -LowLatency $(if $(9R_KEY),-ApiKey "$(9R_KEY)")
+	$(PS) -Mode serve -Model "$(9R_MODEL)" -ApiBase "$(9R_BASE)" -LowLatency -Pipelines $(or $(PIPELINES),2) $(if $(9R_KEY),-ApiKey "$(9R_KEY)")
 
 # Expose the realtime server on voice.<domain> through the voice-speech tunnel.
 CF_TUNNEL ?= voice-speech
@@ -73,8 +76,17 @@ serve:          ## Realtime server for other agents (ws://127.0.0.1:8765/v1/real
 multi:          ## Same server, 3 concurrent sessions (PIPELINES=n to change)
 	$(PS) -Mode serve -Pipelines $(or $(PIPELINES),3)
 
+# The upstream clone is gitignored, so the local patch has to be re-applied
+# after a fresh clone or a pull. --forward skips it when it is already in.
+patch:          ## Re-apply patches/0001 to the upstream clone (idempotent)
+	@test -d speech-to-speech || (echo "clone first: make setup" && exit 1)
+	@cd speech-to-speech && git apply --check ../patches/0001-*.patch 2>/dev/null \
+		&& git apply ../patches/0001-*.patch && echo "patch applied" \
+		|| echo "patch already applied (or conflicts - check git diff)"
+
 setup:          ## One-time: clone upstream, build venv, CUDA torch, extras, LLM, STT
 	@test -d speech-to-speech || git clone https://github.com/huggingface/speech-to-speech
+	$(MAKE) patch
 	uv sync --python 3.11 --project speech-to-speech
 	uv pip install --python $(VENV) "torch==2.11.0" "torchaudio==2.11.0" \
 		--index-url https://download.pytorch.org/whl/cu128 \
@@ -137,6 +149,7 @@ help:
 	@echo "make router      9router LLM instead of Ollama (9R_MODEL, 9R_KEY)"
 	@echo "make router-low  same, low-latency preset for small GPUs / CPU TTS"
 	@echo "make tunnel      run the cloudflared tunnel (CF_TUNNEL=<name>, default voice-speech)"
+	@echo "make patch       re-apply patches/0001 after a fresh clone or pull"
 	@echo "make setup-gguf  fetch the Qwen3-ASR GGUF + transcribe.cpp (STT)"
 	@echo "make setup-q4    fetch the q4 Supertonic graphs if missing"
 	@echo "make indo-serve  Indonesian realtime server"
