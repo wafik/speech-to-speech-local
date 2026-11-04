@@ -60,7 +60,7 @@ router:         ## Realtime server, LLM on 9router (9R_MODEL=..., optional 9R_KE
 # handler quarantines one for up to 180 s. With a single slot either case locks
 # the only user out. Two covers that without a third Supertonic instance.
 router-low:     ## `router` + low-latency tuning, text proxy off (tunnel-safe)
-	$(PS) -Mode serve -Model "$(9R_MODEL)" -ApiBase "$(9R_BASE)" -LowLatency -Pipelines $(or $(PIPELINES),2) $(if $(9R_KEY),-ApiKey "$(9R_KEY)")
+	$(PS) -Mode serve -Model "$(9R_MODEL)" -ApiBase "$(9R_BASE)" -LowLatency -Pipelines $(or $(PIPELINES),2) $(if $(WS_TOKEN),-WsToken "$(WS_TOKEN)") $(if $(9R_KEY),-ApiKey "$(9R_KEY)")
 
 # Expose the realtime server on voice.<domain> through the voice-speech tunnel.
 CF_TUNNEL ?= voice-speech
