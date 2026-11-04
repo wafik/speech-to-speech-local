@@ -29,6 +29,10 @@ param(
     [string]$ApiKey = "",     # empty: $env:9R_KEY, then the Claude Code config, then "none"
     [string]$Mode = "local",  # local | serve | talk
     [int]$Pipelines = 0,      # serve only; 0 = auto (3). Each slot holds its own STT+TTS.
+    [int]$MinSilenceMs = 0,   # end-of-turn silence; 0 = upstream default (64 ms)
+    [int]$BatchSentences = 0, # TTS starts after N LLM sentences; 0 = upstream default (3)
+    [string]$Prompt = "",     # system prompt; empty = upstream default
+    [switch]$LowLatency,      # short replies + sentence-by-sentence TTS + faster turn close
     [switch]$English,         # parakeet + kokoro: lower latency, English only
     [switch]$Online           # omit to stay fully offline once models are cached
 )
@@ -212,6 +216,23 @@ if ($Tts -eq "kokoro") { $cliArgs += @("--kokoro_speed", $Speed) }
 # Left unset, Supertonic follows the language Qwen3-ASR detected on each turn.
 if ($Lang) { $cliArgs += @("--supertonic_tts_lang", $Lang) }
 if ($Tts -eq "supertonic") { $cliArgs += @("--supertonic_tts_voice", $Voice) }
+
+# Latency tuning. On a slow host the defaults spend most of a turn waiting:
+# the assistant writes three sentences before TTS starts, then renders them in
+# one blocking Supertonic call. Sentence-by-sentence streaming overlaps the LLM
+# and the TTS, and a short-reply prompt keeps that overlap short.
+# NOTE: if -BatchSentences is not passed, upstream still batches 3 sentences.
+$batch = if ($BatchSentences -gt 0) { $BatchSentences } elseif ($LowLatency) { 1 } else { 0 }
+if ($batch -gt 0) { $cliArgs += @("--stream_batch_sentences", $batch) }
+if ($MinSilenceMs -gt 0) { $cliArgs += @("--min_silence_ms", $MinSilenceMs) }
+if ($LowLatency -and $MinSilenceMs -le 0) { $cliArgs += @("--min_silence_ms", 400) }
+# The default prompt asks for "less than 20 words" and is ignored by most
+# hosted models; say it as a hard rule instead.
+$systemPrompt = if ($Prompt) { $Prompt }
+                elseif ($LowLatency) { "Anda asisten suara. Jawab dalam bahasa yang dipakai pengguna. Maksimal dua kalimat pendek, tanpa daftar, tanpa penjelasan panjang." }
+                else { "" }
+if ($systemPrompt) { $cliArgs += @("--init_chat_prompt", $systemPrompt) }
+
 # local mode owns the mic; serve mode is headless for other agents
 if ($Mode -eq "local") { $cliArgs += "--local_audio_block_mic_during_playback" }
 # serve mode also exposes /v1/chat/completions so text-only agents can share the same LLM

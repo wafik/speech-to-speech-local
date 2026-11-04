@@ -185,6 +185,34 @@ Needs nothing but an OpenAI-compatible `/v1/chat/completions` that accepts
 `reasoning_effort: "none"`. Anything else — vLLM, llama.cpp, LM Studio, a
 hosted API — works the same way via `run.ps1 -ApiBase <url> -ApiKey <key>`.
 
+#### Low-latency preset (small GPUs, CPU TTS)
+
+On a host where Supertonic's ONNX graph runs on CPU, the defaults waste most of
+a turn: the LLM finishes three sentences before TTS starts, and Supertonic's
+`synthesize()` is blocking, so the first audio waits for the whole chunk.
+
+```bash
+make router-low        # same as `make router`, plus the flags below
+make router-low 9R_MODEL=9r/routers9/deepseek-v4.1-flash-1017
+```
+
+`-LowLatency` sets `--stream_batch_sentences 1` (TTS starts on the first
+sentence and overlaps the LLM), `--min_silence_ms 400`, and a short-reply system
+prompt — the upstream default asks for "less than 20 words", which hosted
+models routinely ignore. Individual knobs are `-BatchSentences`,
+`-MinSilenceMs`, and `-Prompt`.
+
+Measured on a 2 GB MX150 laptop (`tts_ttfa` from the pipeline's own turn log):
+
+| | default | `-LowLatency` |
+|---|---|---|
+| TTS first audio | 9.4 s | **0.7 to 1.2 s** |
+| pipeline e2e (warm) | 16 to 23 s | **7 to 8 s** |
+
+STT still dominates the rest: Qwen Q5_K_M takes 2 to 3 s per pass on that card,
+and the pipeline runs it three times per turn (two progressive, one final).
+
+
 ## Full SGLang (all inside WSL)
 
 The Ollama stack above is the reference. This second stack replaces every GPU

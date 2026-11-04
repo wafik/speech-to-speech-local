@@ -16,7 +16,7 @@ WSL_RUN = MSYS_NO_PATHCONV=1 wsl.exe -d $(WSL_DISTRO) bash -c \
 
 .DEFAULT_GOAL := run
 .PHONY: run english 4b 9b serve multi indo indo-serve voice router setup setup-q4 setup-gguf models stop help \
-        stt hf wsl wsl-setup wsl-status wsl-stop
+        stt hf wsl wsl-setup wsl-status wsl-stop router router-low
 
 run:            ## Start a voice session (Qwen3-ASR Q5 GGUF + gemma4:e4b + Supertonic)
 	$(PS)
@@ -51,6 +51,13 @@ hf:             ## HF bf16 Qwen3-ASR instead of the GGUF (1.57 GB, ~2x VRAM)
 9R_KEY ?=
 router:         ## Realtime server, LLM on 9router (9R_MODEL=..., optional 9R_KEY=...)
 	$(PS) -Mode serve -Model "$(9R_MODEL)" -ApiBase "$(9R_BASE)" $(if $(9R_KEY),-ApiKey "$(9R_KEY)")
+
+# Low-VRAM laptop preset: 2 GB GPU, CPU-only TTS. Turns are ~15 s end to end
+# here because Supertonic runs on the same CPU the STT already saturates; the
+# low-latency flags stop the LLM writing three sentences before TTS starts.
+9R_LOW ?= 1
+router-low:     ## `router` + low-latency tuning (short replies, sentence-by-sentence TTS)
+	$(PS) -Mode serve -Model "$(9R_MODEL)" -ApiBase "$(9R_BASE)" -LowLatency $(if $(9R_KEY),-ApiKey "$(9R_KEY)")
 
 indo-serve:     ## Indonesian realtime server for other agents
 	$(PS) -Lang id -Mode serve
@@ -123,6 +130,7 @@ help:
 	@echo "make stt         STT quant: STT_QUANT=Q8_0|Q6_K (default Q5_K_M)"
 	@echo "make hf          HF bf16 Qwen3-ASR instead of the GGUF"
 	@echo "make router      9router LLM instead of Ollama (9R_MODEL, 9R_KEY)"
+	@echo "make router-low  same, low-latency preset for small GPUs / CPU TTS"
 	@echo "make setup-gguf  fetch the Qwen3-ASR GGUF + transcribe.cpp (STT)"
 	@echo "make setup-q4    fetch the q4 Supertonic graphs if missing"
 	@echo "make indo-serve  Indonesian realtime server"

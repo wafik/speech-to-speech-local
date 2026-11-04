@@ -6,6 +6,8 @@ raycodes/
 bench/audio/
 bench/audio_*.wav
 bench/audio_voice/
+# hardware probe clip, rendered locally by bench/make_probe_wav.py
+bench/probe_*.wav
 # q4 Supertonic graphs, fetched by `make setup-q4` (~130 MB)
 models/
 bench/test.tsv
