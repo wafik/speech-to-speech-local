@@ -283,6 +283,46 @@ Both pipelines are the same code, so the only real difference is the serving
 layer. The Ollama path stays the default because it needs no WSL, no second
 venv, and no source patch.
 
+#### Per-session voice
+
+`session.update` with `audio.output.voice` changes the voice for the rest of
+that session; `F1`-`F5` female, `M1`-`M5` male. `ui/index.html` has a picker
+that defers the change until the current reply finishes, since switching
+mid-reply would splice two voices into one answer.
+
+Upstream's `SupertonicTTSHandler` did not read it at all — it acknowledged the
+update and kept the startup voice. `kokoro_handler.py` already resolves the
+voice per turn; the local patch mirrors that, so **it lives in the gitignored
+upstream clone and does not survive a fresh `git clone` or a `git pull` that
+touches that file.** Re-apply from `docs/superpowers/specs/` if the voice stops
+changing while `session.updated` still arrives.
+
+#### Serving it online
+
+Locally nothing changes: `make router-low` binds `127.0.0.1:8765` and the page
+at <http://127.0.0.1:8765/> talks to `ws://127.0.0.1:8765/v1/realtime`. A tunnel
+is additive; without one, the server is reachable only from this machine.
+
+```bash
+make router-low   # text proxy stays off: a tunnel must not expose free chat
+make tunnel       # cloudflared tunnel -> localhost:8765 (CF_TUNNEL=<name>)
+```
+
+The pipeline serves `ui/index.html` at `/` when `SPEECH_UI_DIR` is set
+(`run.ps1` sets it in serve mode), so one hostname covers both the page and the
+socket. The page picks `wss://<host>/v1/realtime` when loaded over HTTPS and
+`ws://<host>:8765/v1/realtime` otherwise — a browser refuses a `ws://` socket
+from an HTTPS page, and the tunnel only publishes one port.
+
+Put Cloudflare Access (or any login) in front of the hostname before publishing
+it. Configuration for this machine is kept in `docs/networking.md`, which is
+gitignored so the hostname stays out of the repo.
+
+`make router-low` deliberately omits `--enable_llm_proxy`. With it on,
+`/v1/chat/completions` answers 200 and anyone past the gate could spend the
+router's credit on arbitrary text without sending audio. `make router` keeps it
+on for local use.
+
 ## OpenAI-compatible API
 
 `make serve` exposes the same protocol another agent can talk to:

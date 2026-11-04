@@ -33,6 +33,8 @@ param(
     [int]$BatchSentences = 0, # TTS starts after N LLM sentences; 0 = upstream default (3)
     [string]$Prompt = "",     # system prompt; empty = upstream default
     [switch]$LowLatency,      # short replies + sentence-by-sentence TTS + faster turn close
+    [switch]$EnableLlmProxy,  # serve: expose /v1/chat/completions. Off by default so a
+                              # tunnel cannot be used to spend 9router credit on free text.
     [switch]$English,         # parakeet + kokoro: lower latency, English only
     [switch]$Online           # omit to stay fully offline once models are cached
 )
@@ -233,11 +235,21 @@ $systemPrompt = if ($Prompt) { $Prompt }
                 else { "" }
 if ($systemPrompt) { $cliArgs += @("--init_chat_prompt", $systemPrompt) }
 
+# Serve the demo page from the pipeline itself in serve mode, so a single
+# hostname behind a tunnel covers both the page and the socket. Set
+# SPEECH_UI_DIR="" beforehand to run headless.
+if ($Mode -eq "serve" -and -not $env:SPEECH_UI_DIR) {
+    $ui = Join-Path $PSScriptRoot "ui"
+    if (Test-Path (Join-Path $ui "index.html")) { $env:SPEECH_UI_DIR = $ui }
+}
+
 # local mode owns the mic; serve mode is headless for other agents
 if ($Mode -eq "local") { $cliArgs += "--local_audio_block_mic_during_playback" }
-# serve mode also exposes /v1/chat/completions so text-only agents can share the same LLM
+# serve mode can expose /v1/chat/completions so text-only agents share the same
+# LLM. Only on request: behind a tunnel it would let anyone past the gate spend
+# the router's credit on arbitrary text, without ever sending audio.
 if ($Mode -eq "serve") {
-    $cliArgs += "--enable_llm_proxy"
+    if ($EnableLlmProxy) { $cliArgs += "--enable_llm_proxy" }
     $cliArgs += @("--num_pipelines", $slots)
 }
 

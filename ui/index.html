@@ -13,6 +13,9 @@
            background:#3b82f6; color:#fff; cursor:pointer; }
   button:disabled { background:#333; color:#777; cursor:default; }
   #status { margin:1rem 0; color:#888; }
+  select { font:inherit; padding:.45rem .6rem; border-radius:.5rem; border:1px solid #333;
+           background:#1a1a1a; color:#eee; }
+  .bar { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; margin-top:.9rem; }
   .row { border-top:1px solid #262626; padding:.7rem 0; }
   .who { font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; color:#666; }
   .txt { white-space:pre-wrap; }
@@ -22,16 +25,37 @@
 <main>
   <h1 style="font-size:1.3rem">Speech to Speech</h1>
   <button id="go">Mulai bicara</button>
+  <div class="bar">
+    <label for="voice">Suara</label>
+    <select id="voice">
+      <option value="F1">F1 - wanita</option>
+      <option value="F2">F2 - wanita</option>
+      <option value="F3">F3 - wanita</option>
+      <option value="F4">F4 - wanita</option>
+      <option value="F5">F5 - wanita</option>
+      <option value="M1">M1 - pria</option>
+      <option value="M2">M2 - pria</option>
+      <option value="M3">M3 - pria</option>
+      <option value="M4">M4 - pria</option>
+      <option value="M5">M5 - pria</option>
+    </select>
+  </div>
   <div id="status">Siap.</div>
   <div id="log"></div>
 </main>
 <script type="module">
 // Talks to the RealTime WS directly: 16 kHz PCM16 up, 16 kHz PCM16 down.
 // No SDK, no bundler - the whole protocol this demo needs is ~60 lines.
-const WS = `ws://${location.hostname}:8765/v1/realtime`;
+// Served from disk or localhost -> talk to the pipeline port directly. Served
+// over https (Cloudflare tunnel) -> same origin, no port: browsers refuse a
+// ws:// socket from an https page, and the tunnel only exposes /v1/realtime.
+const WS = location.protocol === "https:"
+  ? `wss://${location.host}/v1/realtime`
+  : `ws://${location.hostname}:8765/v1/realtime`;
 const $ = (s) => document.querySelector(s);
 
 let ws, inCtx, outCtx, stream, node, nextAt = 0, running = false;
+let activeResponse = false, pendingVoice = null;
 
 function status(s) { $("#status").textContent = s; }
 
@@ -50,6 +74,23 @@ function b64(bytes) {
   for (let i = 0; i < a.length; i += 0x8000)
     s += String.fromCharCode(...a.subarray(i, i + 0x8000));
   return btoa(s);
+}
+
+// Per-session voice: the server resolves it from session.update on each turn.
+function sendVoice(voice) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({
+    type: "session.update",
+    event_id: `local_voice_${Date.now()}`,
+    session: { type: "realtime", audio: { output: { voice } } },
+  }));
+}
+
+function chooseVoice(voice) {
+  if (!ws || ws.readyState !== 1) { status("sambungkan dulu, lalu ganti suara."); return; }
+  if (activeResponse) { pendingVoice = voice; status(`suara ${voice} aktif di jawaban berikutnya.`); return; }
+  sendVoice(voice);
+  status(`suara: ${voice}.`);
 }
 
 function unb64(str) {
@@ -84,14 +125,26 @@ async function start() {
     const ev = JSON.parse(e.data);
     switch (ev.type) {
       case "input_audio_buffer.speech_started": status("mendengar..."); break;
-      case "response.created": status("berpikir..."); break;
+      case "response.created":
+        activeResponse = true;
+        status("berpikir...");
+        break;
       case "response.output_audio.delta": play(unb64(ev.delta)); status("berbicara..."); break;
-      case "response.done": status("siap."); break;
+      case "response.done":
+        activeResponse = false;
+        status("siap.");
+        // A voice picked mid-reply takes effect on the next turn, not this one:
+        // switching halfway would splice two voices into one answer.
+        if (pendingVoice) { sendVoice(pendingVoice); pendingVoice = null; }
+        break;
       case "error": status("error: " + (ev.error?.message || JSON.stringify(ev))); break;
     }
   };
 
   await new Promise((ok, err) => { ws.onopen = ok; ws.onerror = err; });
+  // Apply whatever the picker shows at connect time, so the first reply already
+  // uses the chosen voice instead of the server's startup default.
+  sendVoice($("#voice").value);
 
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
@@ -124,6 +177,7 @@ async function start() {
 }
 
 $("#go").onclick = () => start().catch((e) => status("gagal: " + e.message));
+$("#voice").onchange = (e) => chooseVoice(e.target.value);
 </script>
 </body>
 </html>
