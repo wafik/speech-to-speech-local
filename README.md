@@ -8,7 +8,7 @@ choices that actually fit in 16 GB, and the benchmarks behind those choices.
 ## Stack
 
 ```
-mic -> Silero VAD -> Qwen3-ASR -> gemma4:e4b (Ollama) -> Supertonic -> speaker
+mic -> Silero VAD -> Qwen3-ASR Q5_K_M (GGUF) -> gemma4:e4b (Ollama) -> Supertonic -> speaker
 ```
 
 There is also a [full-SGLang variant](#full-sglang-all-inside-wsl) that runs the
@@ -17,9 +17,10 @@ same pipeline entirely inside WSL, for comparison.
 | Stage | Default | Why |
 |---|---|---|
 | VAD | Silero v5 | upstream default, 16 kHz |
-| STT | `Qwen/Qwen3-ASR-0.6B-hf` | 30 languages incl. Indonesian + Malay, auto language ID, handles Indonesian/English code-switching |
+| STT | Qwen3-ASR 0.6B **Q5_K_M GGUF** | 645 MB on disk, Vulkan via transcribe.cpp, 30 languages incl. Indonesian + Malay, auto language ID, code-switching. Same WER as bf16 on the test clips |
 | LLM | `gemma4:e4b` @ Ollama | ~0.31 s/turn warm with reasoning off |
-| TTS | Supertonic | 32 languages, 66M params, ONNX on CPU (no VRAM) |
+| TTS | Supertonic q4 | 31 languages, ONNX on CPU (no VRAM), 127 MB |
+| Voice | `F1` | 5 female (F1-F5) and 5 male (M1-M5) styles |
 | English-only | Parakeet TDT + Kokoro | faster per turn, but 25 European languages / 8 voices |
 
 Indonesian needs the Qwen3-ASR + Supertonic pair. Parakeet TDT v3 covers 25
@@ -30,6 +31,7 @@ Swapping only one stage produces the right words in the wrong phonemes.
 
 - Windows + PowerShell 5.1 (the launcher targets it; ASCII-only, no BOM)
 - NVIDIA GPU, CUDA 12.8 wheels (adjust `setup` for another CUDA version)
+- Vulkan driver for the GGUF STT (ships with current NVIDIA drivers; `vulkaninfo` lists the GPU)
 - [uv](https://docs.astral.sh/uv/) >= 0.13.4 — `uv self update`
 - [Ollama](https://ollama.com/) on `127.0.0.1:11434`
 - git, make, and a C++ build toolchain for `ctranslate2` if you use faster-whisper
@@ -43,21 +45,117 @@ make setup
 ```
 
 `setup` clones upstream into `speech-to-speech/`, builds the venv, installs the
-CUDA torch wheels, the TTS extras, and pulls the LLM.
+CUDA torch wheels, the TTS extras, the STT runtime + weights, and pulls the LLM.
 
 Model checkpoints download on first run. To keep them off the system drive:
 
 ```powershell
-setx HF_HOME D:\hf_cache      # Hugging Face models
+setx HF_HOME E:\models\hf     # Hugging Face models
 setx OLLAMA_MODELS D:\ollama  # Ollama blobs
 ```
+
+`run.ps1` runs offline by default, so `HF_HOME` must already hold every
+checkpoint a stage needs. If a run dies with `OfflineModeIsEnabled`, either
+pass `-Online` once or check the repo is in `<HF_HOME>\hub`.
+
+## STT: Qwen3-ASR as a GGUF
+
+The default speech recogniser is the **Q5_K_M** quantisation of
+[`Qwen3-ASR-0.6B`](https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf)
+run by [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
+through its Vulkan backend. 645 MB on disk instead of 1.57 GB, and it measured
+the same 2.4 % WER as the bf16 checkpoint on the Indonesian clips below.
+
+```bash
+make setup-gguf                      # runtime + Q5_K_M weights (one-time)
+make setup-gguf STT_QUANT=Q8_0       # or Q6_K / Q8_0
+```
+
+What that target does, step by step:
+
+```powershell
+# 1. Python bindings. The wheel bundles the Vulkan/CPU native runtime,
+#    so no separate transcribe-cli.exe is needed.
+uv pip install --python speech-to-speech/.venv/Scripts/python.exe "transcribe-cpp==0.4.1"
+
+# 2. Weights. They live in models/, not the HF cache.
+speech-to-speech/.venv/Scripts/hf.exe download handy-computer/Qwen3-ASR-0.6B-gguf `
+    "Qwen3-ASR-0.6B-Q5_K_M.gguf" --local-dir models/qwen-asr-gguf
+
+# 3. Verify: 645,356,192 bytes, sha256 062a7bcb...16b54358
+Get-FileHash models/qwen-asr-gguf/Qwen3-ASR-0.6B-Q5_K_M.gguf -Algorithm SHA256
+```
+
+Available files in that repo, and why Q5_K_M is the default:
+
+| File | Size | sha256 (first 8) | Indonesian WER |
+|---|---|---|---|
+| `...-BF16.gguf` | 1.57 GB | `dadb8196` | 2.4 % |
+| `...-Q8_0.gguf` | 850 MB | `f081b2d5` | 2.4 % |
+| `...-Q6_K.gguf` | 690 MB | `3b051f10` | 2.4 % |
+| **`...-Q5_K_M.gguf`** | **645 MB** | **`062a7bcb`** | **2.4 %** |
+| `...-Q4_K_M.gguf` | 590 MB | `5b58f32a` | 4.8 % ← rejected |
+
+Q4 is the only step that loses accuracy here; the published LibriSpeech numbers
+move from 2.12 % to 2.26 %, but on these clips one more word goes wrong. Q5_K_M
+is the last level that stays word-identical, so it wins on size-per-error.
+
+### How it plugs into the pipeline
+
+The upstream clone stays unmodified. `scripts/gguf_stt_server.py` is a small
+OpenAI-compatible server (`POST /v1/audio/transcriptions`, `GET /health`), and
+the pipeline's existing `--stt openai` backend talks to it:
+
+```
+speech-to-speech.exe --stt openai --openai_stt_base_url http://127.0.0.1:8011/v1
+        |
+        v
+scripts/gguf_stt_server.py  (FastAPI + transcribe_cpp)  ->  Vulkan GPU
+```
+
+`run.ps1` starts that server on `127.0.0.1:8011` when it is not already
+listening, waits for `/health`, and stops it when the pipeline exits. A server
+you started yourself is left alone. One model instance serves all pipeline
+slots, so `make multi` does not load three copies of the weights.
+
+Run the server by hand when you want to poke at it:
+
+```powershell
+speech-to-speech\.venv\Scripts\python.exe -I scripts\gguf_stt_server.py `
+    --model models\qwen-asr-gguf\Qwen3-ASR-0.6B-Q5_K_M.gguf --port 8011
+```
+
+```bash
+curl -F file=@bench/audio/1515.wav -F model=qwen3-asr http://127.0.0.1:8011/v1/audio/transcriptions
+# {"text":"Ini adalah CEP kelima Martelli dalam empat tahun.","language":"id-auto"}
+```
+
+`language` comes back as `<code>-auto` when the model detected it, matching the
+upstream Qwen handler; send `-F language=id` to force one and get a bare `id`.
+
+### Switching or falling back
+
+```bash
+make                                  # Q5_K_M GGUF (default)
+make stt STT_QUANT=Q8_0               # other GGUF level; needs make setup-gguf STT_QUANT=... first
+make hf                               # bf16 Qwen3-ASR through Transformers (1.57 GB, ~1.7 GB VRAM)
+make english                          # Parakeet TDT + Kokoro, English only
+```
+
+`make hf` also returns to the HF cache check: the bf16 checkpoint has to be in
+`HF_HOME`, and offline mode needs it cached first. The GGUF path never touches
+the network at run time.
 
 ## Run
 
 ```bash
-make              # Qwen3-ASR + gemma4:e4b + Supertonic, language auto-detected
+make              # Qwen3-ASR Q5 GGUF + gemma4:e4b + Supertonic, language auto-detected
 make english      # Parakeet + Kokoro, lower latency, English only
 make indo         # same as make, pins the TTS voice to Indonesian
+make voice        # female voice by default; VOICE=F3 for another one
+make stt          # STT_QUANT=Q8_0 or Q6_K instead of Q5_K_M
+make hf           # bf16 Qwen3-ASR instead of the GGUF
+make router       # 9router LLM instead of Ollama (see below)
 make 4b           # qwen3.5:4b instead of gemma4:e4b
 make 9b           # qwen3.5:9b
 make serve        # headless realtime server, 3 concurrent sessions
@@ -66,6 +164,26 @@ make stop         # kill a running session
 
 `run.ps1` also takes `-Online` to allow Hugging Face network calls; the default
 is fully offline once the checkpoints are cached.
+
+### Alternate LLM on 9router
+
+`make router` points the text stage at [9router](https://127.0.0.1:20128/v1)
+instead of Ollama. Same pipeline, same STT/TTS — only the LLM endpoint changes,
+and the local Ollama server is not started.
+
+```bash
+make router                                    # nemotron-3.5-lightning on :20128
+make router 9R_MODEL=9r/routers9/nemotron-3.5-super-vl
+9R_KEY=sk-... make router                      # only to override the auto-found key
+```
+
+The key is resolved automatically: `9R_KEY`, then the token Claude Code already
+uses for that endpoint in `~/.claude/settings.json`. Nothing is written anywhere.
+9router must already be running (`npx 9router` or its background service).
+
+Needs nothing but an OpenAI-compatible `/v1/chat/completions` that accepts
+`reasoning_effort: "none"`. Anything else — vLLM, llama.cpp, LM Studio, a
+hosted API — works the same way via `run.ps1 -ApiBase <url> -ApiKey <key>`.
 
 ## Full SGLang (all inside WSL)
 
@@ -177,21 +295,45 @@ Measured on this machine, 8 FLEURS Indonesian validation clips.
 
 ### STT (WER after normalisation, latency per turn)
 
-| | Qwen3-ASR-0.6B | faster-whisper medium-id |
-|---|---|---|
-| Corpus WER | 2.4 % | 2.4 % |
-| 6.5 to 10.9 s clip | 723 ms | **309 ms** |
-| 2.5 s turn | 136 ms | **129 ms** |
-| Peak VRAM | 1.67 GB | ~0.8 GB (int8) |
-| Code-switching | **yes** | no, forces Indonesian |
+| | Qwen bf16 (HF) | **Qwen Q5_K_M (GGUF)** | Qwen Q4_K_M | faster-whisper medium-id |
+|---|---|---|---|---|
+| File size | 1.57 GB | **645 MB** | 590 MB | ~0.8 GB |
+| Corpus WER | 2.4 % | **2.4 %** | 4.8 % | 2.4 % |
+| 6.5 to 10.9 s clip (Vulkan) | 728 ms | **142 ms** | 142 ms | 309 ms |
+| Model load | ~2 s | **0.62 s** | 0.55 s | — |
+| Peak VRAM | 1.67 GB | **~0.86 GB** | ~0.80 GB | ~0.8 GB (int8) |
+| Code-switching | yes | **yes** | yes | no, forces Indonesian |
 
-The WER tie is 8 clips with identical errors — not a real ranking. The latency
-split is real: Whisper is constant-time, Qwen3-ASR's decoder grows with audio
-length. Use faster-whisper if turns routinely run past 5 s.
+bf16 latency was measured through Transformers; the GGUF numbers through
+transcribe.cpp on Vulkan, so the 5x gap is mostly the runtime, not the quant.
+VRAM for bf16 is PyTorch's `max_memory_allocated`; GGUF figures are `nvidia-smi`
+deltas, so treat the two columns as close, not exact.
+
+Every other level on the same 8 clips, plus Whisper Turbo for comparison:
+
+| Model | Size | Load | Median | WER | VRAM delta |
+|---|---|---|---|---|---|
+| Qwen Q8_0 | 850 MB | 0.86 s | 146 ms | 2.4 % | ~1.10 GB |
+| Qwen Q6_K | 690 MB | 0.71 s | 144 ms | 2.4 % | ~0.95 GB |
+| **Qwen Q5_K_M** | **645 MB** | 0.62 s | **142 ms** | **2.4 %** | **~0.86 GB** |
+| Qwen Q4_K_M | 590 MB | 0.55 s | 142 ms | 4.8 % | ~0.80 GB |
+| Whisper Turbo Q8_0 | 886 MB | 0.63 s | 157 ms | 10.7 % | ~0.92 GB |
+| Whisper Turbo Q4_K_M | 536 MB | 0.40 s | 145 ms | 10.7 % | ~0.58 GB |
+
+The Whisper comparison is subset-limited: 8 clips, and Whisper was not given a
+language hint. The published FLEURS Indonesian numbers are Whisper Turbo 7.2 %
+against Qwen3-ASR 8.49 %, so this table is **not** a general ranking — on this
+subset the words Whisper misses are the same 8 clips Qwen gets right.
+
+The WER tie between bf16 and Q5 is also 8 clips with identical errors, not a
+real ranking, but it is enough to say quantisation down to Q5 costs nothing
+measurable here. Q4 is where it breaks.
 
 ```bash
 python bench/fetch_clips.py                          # needs the pipeline venv
 python bench/bench_stt.py                            # qwen|fw|both
+python bench/bench_gguf_stt.py                       # all GGUF levels + Whisper
+python bench/bench_gguf_stt.py qwen-q5 whisper-q8    # or pick models
 python bench/wer.py
 python bench/e2e_id.py bench/audio_short.wav         # end-to-end against `make serve`
 ```
@@ -207,8 +349,22 @@ python bench/e2e_id.py bench/audio_short.wav         # end-to-end against `make 
 
 ### TTS
 
-Supertonic runs on CPU via ONNX: RTF 0.18 to 0.20, so about 820 ms for 4 s of
-audio. The 0.005 RTF on its model card is an RTX 4090, not what you get here.
+Supertonic runs on CPU via ONNX. The default graphs are a **q4** build of the
+same checkpoint (127 MB instead of 380 MB): RTF 0.113 against 0.199, roughly
+1.8x faster, and word-identical when round-tripped back through Qwen3-ASR
+(5 Indonesian sentences, 2 runs each, 0 % WER both). `run.ps1` points
+`SUPERTONIC_CACHE_DIR` at `models/supertonic-3-q4`, so nothing is patched.
+
+```bash
+make setup-q4    # fetch the graphs if they are missing (~130 MB)
+```
+
+Two community variants were rejected: fp16 gave no speedup on CPU (0.194), and
+int8 produced noise (100 % WER, 7x slower). To compare them yourself, `python
+bench/tts_listen.py "teks" F1` renders fp32 and q4 side by side.
+
+Note that ASR-as-judge only catches gross breakage — it cannot tell timbre
+apart, so quantisation artifacts still need a listen.
 
 ### End to end
 
@@ -228,8 +384,26 @@ TTFA : 2.1 s warm   (STT 0.14 s + LLM 0.31 s + TTS first chunk)
   gateway in front. Do not expose it to a network you do not control.
 - **`gemma4:e4b` is 7.5B parameters** (Q4_K_M), despite the name — "E4B" means
   *effective* 4B.
-- **VRAM:** LLM ~3.1 GB + STT 1.7 GB + VAD/TTS overhead fits in 16 GB with room
-  for 3 pipeline slots. Each extra slot loads its own STT and TTS.
+- **VRAM:** LLM ~3.1 GB + STT ~0.9 GB (Q5 GGUF, shared across slots) + VAD/TTS
+  overhead fits in 16 GB with room for 3 pipeline slots. Each extra slot loads
+  its own TTS, but the GGUF STT is one server process. `make hf` puts the old
+  1.7 GB back.
+
+## Troubleshooting
+
+- **`Missing ...Qwen3-ASR-0.6B-Q5_K_M.gguf`** — run `make setup-gguf` (add
+  `STT_QUANT=Q8_0` for another level; the path in the error names the file).
+- **`GGUF STT server failed to start`** — run the server command from
+  [STT: Qwen3-ASR as a GGUF](#stt-qwen3-asr-as-a-gguf) in a visible shell; the
+  import error is usually `transcribe_cpp` missing from the venv
+  (`make setup-gguf` reinstalls it).
+- **Backend is `CPU` in the server's `READY` line** — Vulkan did not find a
+  device. `vulkaninfo --summary` should list your GPU; update the driver, or
+  force `--backend cpu` (slower, still works).
+- **Port 8011 busy** — something already serves STT there and `run.ps1`
+  reuses it. Stop it (`Get-Process python | ...`) or change `$sttPort` in
+  `run.ps1`; the pipeline port is separate.
+- **`All session slots are in use`** — see the first caveat; it clears in ~1.4 s.
 
 ## License
 
