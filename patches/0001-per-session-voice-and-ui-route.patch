@@ -109,7 +109,7 @@ index 4e1ad03..f7fb428 100644
          )
  
 diff --git a/src/speech_to_speech/api/openai_realtime/websocket_router.py b/src/speech_to_speech/api/openai_realtime/websocket_router.py
-index f98c908..b32f614 100644
+index f98c908..6150f06 100644
 --- a/src/speech_to_speech/api/openai_realtime/websocket_router.py
 +++ b/src/speech_to_speech/api/openai_realtime/websocket_router.py
 @@ -1,5 +1,7 @@
@@ -120,15 +120,16 @@ index f98c908..b32f614 100644
  import time
  from collections.abc import AsyncIterator
  from contextlib import asynccontextmanager
-@@ -9,6 +11,7 @@ from typing import Any, Callable, TypeVar
+@@ -9,6 +11,8 @@ from typing import Any, Callable, TypeVar
  
  import numpy as np
  from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
++from fastapi.middleware.cors import CORSMiddleware
 +from fastapi.responses import FileResponse
  from openai.types.realtime import (
      ConversationItemCreateEvent,
      ConversationItemDeleteEvent,
-@@ -97,6 +100,61 @@ SESSION_END_QUARANTINE_TIMEOUT_S = 180.0
+@@ -97,6 +101,61 @@ SESSION_END_QUARANTINE_TIMEOUT_S = 180.0
  QItem = TypeVar("QItem")
  
  
@@ -190,7 +191,34 @@ index f98c908..b32f614 100644
  def _keep_cancel_bookkeeping(item: Any) -> bool:
      # Usage and lifecycle sentinels must survive cancellation queue flushes.
      # Dropping SESSION_END would leave the release path waiting forever.
-@@ -627,8 +685,24 @@ def create_app(
+@@ -607,6 +666,26 @@ def create_app(
+ 
+     app = FastAPI(lifespan=lifespan)
+ 
++    # A frontend on another origin (Cloudflare Pages, Netlify) fetches the open
++    # capabilities route and may fetch gated JSON with a bearer token. WebSocket
++    # is not subject to CORS, but fetch is: without this the browser blocks the
++    # response even though the server answered 200.
++    # Origins come from SPEECH_ALLOWED_ORIGINS (comma separated); "*" allows any,
++    # which is fine here because the data is public and auth is a bearer token,
++    # not a cookie - so there is no ambient credential to steal.
++    _origins = [
++        o.strip()
++        for o in os.environ.get("SPEECH_ALLOWED_ORIGINS", "*").split(",")
++        if o.strip()
++    ]
++    app.add_middleware(
++        CORSMiddleware,
++        allow_origins=_origins,
++        allow_methods=["GET", "POST", "OPTIONS"],
++        allow_headers=["Authorization", "Content-Type"],
++        max_age=600,
++    )
++
+     llm_proxy_usage = mount_llm_proxy(app, llm_proxy_config)
+ 
+     def _claim_unit(transport: SessionTransport | None) -> PipelineUnit | None:
+@@ -627,8 +706,24 @@ def create_app(
          offered_subprotocols = {
              protocol.strip() for protocol in ws.headers.get("sec-websocket-protocol", "").split(",")
          }
@@ -215,7 +243,7 @@ index f98c908..b32f614 100644
          transport = WebSocketTransport(ws)
          unit = _claim_unit(transport)
          if unit is None:
-@@ -684,14 +758,34 @@ def create_app(
+@@ -684,14 +779,34 @@ def create_app(
              # can be skipped/cancelled by Starlette's runner and never resume.
              _release_session(unit, session_id)
  
@@ -252,7 +280,7 @@ index f98c908..b32f614 100644
          # Aggregate usage across the pool. Numeric fields sum; dict fields (e.g.
          # errors_by_type) merge with numeric leaves summed too, so per-unit error
          # counts don't get dropped by the first-unit's value.
-@@ -714,8 +808,10 @@ def create_app(
+@@ -714,8 +829,10 @@ def create_app(
          total["llm_proxy"] = llm_proxy_usage.model_dump()
          return total
  

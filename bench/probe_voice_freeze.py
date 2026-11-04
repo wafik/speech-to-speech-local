@@ -10,6 +10,7 @@ checks that the whole reply is one voice while the NEXT reply got the new one.
 import asyncio
 import base64
 import json
+import os
 import sys
 import wave
 from pathlib import Path
@@ -17,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import websockets
 
-URL = "ws://127.0.0.1:8765/v1/realtime"
+URL = os.environ.get("S2S_URL", "ws://127.0.0.1:8765") + "/v1/realtime"
 
 
 def token() -> str:

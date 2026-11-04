@@ -1,0 +1,100 @@
+<!doctype html>
+<!--
+  Test harness for s2s.js. Serves from any static origin, e.g.:
+      python -m http.server 8080 --directory examples/pages-client
+  then open http://127.0.0.1:8080/test.html?url=wss://host&token=T
+-->
+<meta charset="utf-8">
+<title>s2s.js test</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; max-width: 720px; }
+  #status { font-weight: 600; margin: 12px 0; }
+  #log div { border-top: 1px solid #eee; padding: 4px 0; }
+  button { font-size: 15px; padding: 8px 16px; }
+  .ok { color: #067a3b; } .bad { color: #b42318; }
+</style>
+<h1>s2s.js test</h1>
+<button id="go">Mulai</button>
+<select id="voice">
+  <option>F1</option><option>F2</option><option>F3</option><option>F4</option><option>F5</option>
+  <option>M1</option><option>M2</option><option>M3</option><option>M4</option><option>M5</option>
+</select>
+<div id="status">belum terhubung</div>
+<div id="log"></div>
+
+<script type="module">
+import { createVoiceClient } from "./s2s.js";
+
+const q = new URLSearchParams(location.search);
+const statusEl = document.querySelector("#status");
+const logEl = document.querySelector("#log");
+const status = (s) => { statusEl.textContent = s; };
+const log = (who, text) => {
+  const row = document.createElement("div");
+  row.textContent = `${who}: ${text}`;
+  logEl.prepend(row);
+};
+
+let voice = null;
+document.querySelector("#go").onclick = async () => {
+  if (!voice) {
+    voice = createVoiceClient({
+      url: q.get("url") || "ws://127.0.0.1:8765/v1/realtime",
+      token: q.get("token") || "",
+      onStatus: status,
+      onTranscript: log,
+    });
+  }
+  try {
+    await voice.connect();
+    await voice.setVoice(document.querySelector("#voice").value);
+  } catch (e) {
+    status(`gagal: ${e.message}`);
+  }
+};
+
+// Automation hooks: a headless check has no microphone, so it drives the same
+// socket with a WAV file and reports what came back.
+window.__s2s = {
+  status: () => statusEl.textContent,
+  log: () => [...logEl.children].map((d) => d.textContent),
+  // One full turn with audio metering: counts what the server actually sent back
+  // and how long it took, so "berbicara" does not have to be caught by polling.
+  async turn(url) {
+    const ws = voice.socket;
+    let bytes = 0, deltas = 0;
+    const prev = ws.onmessage;
+    const t0 = performance.now();
+    let doneAt = 0;
+    ws.onmessage = (e) => {
+      const ev = JSON.parse(e.data);
+      if (ev.type === "response.output_audio.delta") {
+        bytes += atob(ev.delta).length;
+        deltas++;
+      }
+      if (ev.type === "response.done" && !doneAt) doneAt = performance.now() - t0;
+      prev(e);
+    };
+    const sent = await window.__s2s.sendWav(url);
+    for (let i = 0; i < 240 && !doneAt; i++) await new Promise((r) => setTimeout(r, 250));
+    ws.onmessage = prev;
+    return { sent, deltas, audioSeconds: +(bytes / 2 / 16000).toFixed(2), replyMs: Math.round(doneAt), status: statusEl.textContent };
+  },
+  // Sends a 16 kHz mono PCM16 WAV as input_audio_buffer.append frames.
+  async sendWav(url) {
+    const buf = await (await fetch(url)).arrayBuffer();
+    const pcm = new Int16Array(buf.slice(44));   // probe clip is raw PCM after the header
+    for (let i = 0; i < pcm.length; i += 320) {
+      const slice = pcm.subarray(i, i + 320);
+      const b = new Uint8Array(slice.buffer, slice.byteOffset, slice.byteLength);
+      let s = "";
+      for (const x of b) s += String.fromCharCode(x);
+      voice.socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: btoa(s) }));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return "sent " + pcm.length + " samples";
+  },
+};
+</script>
+</body>
+</html>
