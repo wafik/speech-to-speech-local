@@ -17,6 +17,8 @@ _bench/
 ui/test_id.wav
 # this machine's tunnel hostname + dashboard steps; stays out of the repo
 docs/networking.md
+# generated caller token for serve mode - a secret, never committed
+_ws_token
 # tooling noise
 _tools/
 _serve.log

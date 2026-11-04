@@ -65,6 +65,7 @@ router-low:     ## `router` + low-latency tuning, text proxy off (tunnel-safe)
 # Expose the realtime server on voice.<domain> through the voice-speech tunnel.
 CF_TUNNEL ?= voice-speech
 tunnel:         ## Run the voice-speech tunnel (needs `make router-low` in another shell)
+	@test -f _ws_token || (echo "start make router-low first: it generates _ws_token" && exit 1)
 	cloudflared tunnel run --url http://localhost:8765 $(CF_TUNNEL)
 
 indo-serve:     ## Indonesian realtime server for other agents

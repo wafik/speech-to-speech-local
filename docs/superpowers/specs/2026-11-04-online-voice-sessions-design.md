@@ -50,9 +50,9 @@ menyambung ke server ini lewat URL/domain.
 
 | Keputusan | Nilai |
 |---|---|
-| Klien | Web app di browser |
-| Auth | Cloudflare Access (login Google/OTP per email) |
-| Pemakai | 1-2 orang, tidak bersamaan, 1 slot cukup |
+| Klien | Web app di browser, boleh di origin lain (Cloudflare Pages) |
+| Auth | Token bersama di backend; login/gate milik frontend masing-masing |
+| Pemakai | Siapa pun yang bisa membuka frontend; 2 slot di backend |
 | Suara | Supertonic, bisa dipilih per sesi |
 | Domain | dipilih pengguna; hostname aslinya sengaja tidak ditulis di repo |
 
@@ -109,8 +109,41 @@ cloudflared tunnel route dns speech voice.<domain>
 cloudflared tunnel run --url http://localhost:8765 speech
 ```
 
-Lalu di dashboard Cloudflare Zero Trust: buat Access application untuk
-`voice.<domain>`, policy `Allow` dengan daftar email pengguna.
+### 4b. Auth: gate di frontend, token di backend
+
+Keputusan yang berubah setelah versi pertama: pengguna ingin **frontend
+terpisah** (mis. Cloudflare Pages) dan **bebas siapa saja yang bisa membuka
+frontend itu**. Itu membatalkan Cloudflare Access di hostname backend:
+
+- Access memasang cookie first-party untuk hostname backend. Dari origin lain
+  cookie itu third-party dan diblokir browser modern.
+- Browser juga tidak bisa mengirim header auth pada WebSocket.
+
+Jadi gate dipindah ke tempat pengguna login (frontend masing-masing), dan
+backend memeriksa **token bersama** yang tidak bergantung pada origin:
+
+| Pemanggil | Cara mengirim token |
+|---|---|
+| Browser | subprotocol: `new WebSocket(url, ["realtime", "token.<T>"])` |
+| curl / Python / Go | `Authorization: Bearer <T>` atau `?token=<T>` |
+
+- Token dibuat `run.ps1` sekali dan disimpan di `_ws_token` (gitignored),
+  atau dipatok lewat `-WsToken` / `$env:SPEECH_WS_TOKEN`.
+- Token diperiksa **sebelum** slot diklaim. Token salah -> `error` event lalu
+  `1008`, tanpa memakan slot; socket **di-accept dulu** supaya browser bisa
+  menampilkan pesan, bukan sekadar 403.
+- `/v1/realtime/capabilities` tetap terbuka (daftar bahasa/suara, bukan data
+  sesi). `/v1/pool`, `/v1/usage`, dan socket dijaga.
+- Tanpa token terkonfigurasi, server tidak memeriksa apa pun - benar untuk
+  `127.0.0.1`, salah untuk di belakang tunnel.
+- Ini **shared secret, bukan identitas per orang**: siapa pun yang memegangnya
+  masuk. Mencabut akses = ganti token + deploy ulang frontend.
+
+Konsekuensi yang harus disadari: tidak ada audit per pengguna, dan frontend
+yang membocorkan token membocorkan akses. Untuk 1-2 orang yang tidak pernah
+bersamaan itu proporsional; kalau nanti perlu per-orang, ganti ke Access di
+hostname backend dan selesaikan masalah cookie-nya (frontend satu origin, atau
+proxy Pages Function).
 
 ### 5. Batas yang perlu disebut ke pengguna
 

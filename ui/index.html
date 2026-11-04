@@ -46,12 +46,33 @@
 <script type="module">
 // Talks to the RealTime WS directly: 16 kHz PCM16 up, 16 kHz PCM16 down.
 // No SDK, no bundler - the whole protocol this demo needs is ~60 lines.
-// Served from disk or localhost -> talk to the pipeline port directly. Served
-// over https (Cloudflare tunnel) -> same origin, no port: browsers refuse a
-// ws:// socket from an https page, and the tunnel only exposes /v1/realtime.
-const WS = location.protocol === "https:"
-  ? `wss://${location.host}/v1/realtime`
-  : `ws://${location.hostname}:8765/v1/realtime`;
+//
+// This page runs from anywhere: served by the pipeline itself, opened from
+// disk, or hosted on a different origin (Cloudflare Pages, Netlify, ...).
+// Point it at a backend with query params or a saved default:
+//
+//   ?server=wss://your-host&token=THE_TOKEN
+//
+// Default: same host the page was served from. Over https use wss and no port
+// (browsers refuse a ws:// socket from an https page, and a tunnel publishes
+// only one port); otherwise the local pipeline on :8765.
+const params = new URLSearchParams(location.search);
+const saveKey = "s2s.server", tokenKey = "s2s.token";
+if (params.get("server")) localStorage.setItem(saveKey, params.get("server"));
+if (params.get("token")) localStorage.setItem(tokenKey, params.get("token"));
+
+const SERVER = (params.get("server") || localStorage.getItem(saveKey) || "").replace(/\/+$/, "");
+const WS = SERVER
+  ? `${SERVER}/v1/realtime`
+  : location.protocol === "https:"
+    ? `wss://${location.host}/v1/realtime`
+    : `ws://${location.hostname}:8765/v1/realtime`;
+const TOKEN = params.get("token") || localStorage.getItem(tokenKey) || "";
+
+// A browser cannot set headers on a WebSocket, so the token goes in the
+// subprotocol list: the server reads "token.<T>" and still negotiates
+// "realtime" for the protocol itself.
+const PROTOCOLS = TOKEN && /^[A-Za-z0-9._~-]+$/.test(TOKEN) ? ["realtime", `token.${TOKEN}`] : ["realtime"];
 const $ = (s) => document.querySelector(s);
 
 let ws, inCtx, outCtx, stream, node, nextAt = 0, running = false;
@@ -119,10 +140,20 @@ async function start() {
   line("you", "");
   status("menghubungkan...");
 
-  ws = new WebSocket(WS);
-  ws.onclose = () => { status("terputus."); $("#go").disabled = false; running = false; };
+  ws = new WebSocket(WS, PROTOCOLS);
+  let ready = false, failConnect = null, resolveSession = null;
+  ws.onclose = (e) => {
+    running = false;
+    $("#go").disabled = false;
+    const msg = e.code === 1008
+      ? "ditolak: token/server salah (cek ?server= dan ?token=)."
+      : `terputus (${e.code}).`;
+    status(msg);
+    if (!ready && failConnect) failConnect(new Error(msg));  // never got session.created
+  };
   ws.onmessage = (e) => {
     const ev = JSON.parse(e.data);
+    if (ev.type === "session.created" && !ready) { ready = true; failConnect = null; resolveSession?.(); }
     switch (ev.type) {
       case "input_audio_buffer.speech_started": status("mendengar..."); break;
       case "response.created":
@@ -141,7 +172,15 @@ async function start() {
     }
   };
 
-  await new Promise((ok, err) => { ws.onopen = ok; ws.onerror = err; });
+  // The server accepts the socket even when the token is wrong, then sends an
+  // error event and closes. Wait for session.created so a bad token stops here,
+  // before the mic prompt, instead of looking like a connected call.
+  await new Promise((ok, err) => {
+    resolveSession = ok;
+    failConnect = err;
+    ws.onerror = () => err(new Error("socket ditolak"));
+  });
+
   // Apply whatever the picker shows at connect time, so the first reply already
   // uses the chosen voice instead of the server's startup default.
   sendVoice($("#voice").value);

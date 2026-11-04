@@ -12,11 +12,17 @@ import base64
 import json
 import sys
 import wave
+from pathlib import Path
 
 import numpy as np
 import websockets
 
 URL = "ws://127.0.0.1:8765/v1/realtime"
+
+
+def token() -> str:
+    path = Path(__file__).resolve().parent.parent / "_ws_token"
+    return path.read_text().strip() if path.is_file() else ""
 
 
 def pcm16(path):
@@ -101,7 +107,9 @@ async def one_turn(ws, pcm, switch_at=None, switch_to=None):
 
 async def main(path, first="F2", second="M4"):
     pcm = pcm16(path)
-    async with websockets.connect(URL, max_size=None) as ws:
+    tok = token()
+    async with websockets.connect(URL, max_size=None, additional_headers=(
+            {"Authorization": f"Bearer {tok}"} if tok else None)) as ws:
         await ws.recv()  # session.created
         await set_voice(ws, first)
         await asyncio.sleep(0.5)

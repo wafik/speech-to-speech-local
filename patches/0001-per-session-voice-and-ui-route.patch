@@ -109,17 +109,18 @@ index 4e1ad03..f7fb428 100644
          )
  
 diff --git a/src/speech_to_speech/api/openai_realtime/websocket_router.py b/src/speech_to_speech/api/openai_realtime/websocket_router.py
-index f98c908..4c6dc41 100644
+index f98c908..b32f614 100644
 --- a/src/speech_to_speech/api/openai_realtime/websocket_router.py
 +++ b/src/speech_to_speech/api/openai_realtime/websocket_router.py
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  import asyncio
++import hmac
  import logging
 +import os
  import time
  from collections.abc import AsyncIterator
  from contextlib import asynccontextmanager
-@@ -9,6 +10,7 @@ from typing import Any, Callable, TypeVar
+@@ -9,6 +11,7 @@ from typing import Any, Callable, TypeVar
  
  import numpy as np
  from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
@@ -127,7 +128,94 @@ index f98c908..4c6dc41 100644
  from openai.types.realtime import (
      ConversationItemCreateEvent,
      ConversationItemDeleteEvent,
-@@ -684,6 +686,22 @@ def create_app(
+@@ -97,6 +100,61 @@ SESSION_END_QUARANTINE_TIMEOUT_S = 180.0
+ QItem = TypeVar("QItem")
+ 
+ 
++# ── Caller auth ──────────────────────────────────────────────────────
++# SPEECH_WS_TOKEN gates the realtime socket and the read-only JSON routes.
++# Empty/unset means "no token configured": the server is assumed to be
++# reachable only from this machine (127.0.0.1) or behind an external gate.
++# A tunnel publishes a hostname to the whole internet, so set it before
++# `make tunnel`.
++_WS_TOKEN_ENV = "SPEECH_WS_TOKEN"
++
++
++def _ws_token() -> str:
++    return os.environ.get(_WS_TOKEN_ENV, "").strip()
++
++
++def _presented_token(ws: WebSocket | None = None, request: Request | None = None) -> str:
++    """Token from either place a browser can supply one on a WebSocket.
++
++    A browser cannot set headers on `new WebSocket()`, so the token rides in the
++    subprotocol list instead: `new WebSocket(url, ["realtime", "token.<T>"])`.
++    Non-browser clients may use `Authorization: Bearer <T>` or `?token=<T>`,
++    which is also what `curl` and the probe scripts use.
++    """
++    headers = ws.headers if ws is not None else request.headers
++    auth = headers.get("authorization", "")
++    if auth.lower().startswith("bearer "):
++        return auth[7:].strip()
++    for protocol in (ws.headers.get("sec-websocket-protocol", "") if ws is not None else "").split(","):
++        protocol = protocol.strip()
++        if protocol.startswith("token."):
++            return protocol[len("token."):]
++    params = ws.query_params if ws is not None else request.query_params
++    return params.get("token", "").strip()
++
++
++def _check_ws_access(ws: WebSocket) -> str | None:
++    """None when allowed, else the reason to close with (no token is echoed)."""
++    expected = _ws_token()
++    if not expected:
++        return None
++    if hmac.compare_digest(_presented_token(ws), expected):
++        return None
++    return "unauthorized"
++
++
++def _check_http_access(request: Request) -> Response | None:
++    expected = _ws_token()
++    if not expected or hmac.compare_digest(_presented_token(request=request), expected):
++        return None
++    return Response(
++        content='{"error":{"message":"unauthorized","type":"invalid_request_error"}}',
++        status_code=401,
++        media_type="application/json",
++        headers={"WWW-Authenticate": "Bearer"},
++    )
++
++
+ def _keep_cancel_bookkeeping(item: Any) -> bool:
+     # Usage and lifecycle sentinels must survive cancellation queue flushes.
+     # Dropping SESSION_END would leave the release path waiting forever.
+@@ -627,8 +685,24 @@ def create_app(
+         offered_subprotocols = {
+             protocol.strip() for protocol in ws.headers.get("sec-websocket-protocol", "").split(",")
+         }
++        # Accept first, then reject. Refusing the handshake shows a browser only
++        # "403" with no explanation; accepting costs nothing (no slot is claimed
++        # below) and lets the page tell the user the token is wrong.
+         await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
+ 
++        denied = _check_ws_access(ws)
++        if denied is not None:
++            logger.warning(f"Rejected WebSocket connection: {denied}")
++            await send_ws_event(
++                ws,
++                build_error_event(
++                    "Unauthorized: missing or wrong token.",
++                    error_type="invalid_api_key",
++                ),
++            )
++            await ws.close(code=1008, reason=denied)
++            return
++
+         transport = WebSocketTransport(ws)
+         unit = _claim_unit(transport)
+         if unit is None:
+@@ -684,14 +758,34 @@ def create_app(
              # can be skipped/cancelled by Starlette's runner and never resume.
              _release_session(unit, session_id)
  
@@ -147,6 +235,33 @@ index f98c908..4c6dc41 100644
 +        async def ui_index() -> FileResponse:
 +            return FileResponse(_ui_index)
 +
++    # Open on purpose: a frontend needs the language/voice list before it has
++    # anything. It exposes no session data and no usage.
      @app.get("/v1/realtime/capabilities")
      async def capabilities_endpoint() -> dict[str, Any]:
          return {
+             "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
+         }
+ 
+-    @app.get("/v1/usage")
+-    async def usage_endpoint() -> dict[str, Any]:
++    @app.get("/v1/usage", response_model=None)
++    async def usage_endpoint(request: Request) -> dict[str, Any] | Response:
++        if (denied := _check_http_access(request)) is not None:
++            return denied
+         # Aggregate usage across the pool. Numeric fields sum; dict fields (e.g.
+         # errors_by_type) merge with numeric leaves summed too, so per-unit error
+         # counts don't get dropped by the first-unit's value.
+@@ -714,8 +808,10 @@ def create_app(
+         total["llm_proxy"] = llm_proxy_usage.model_dump()
+         return total
+ 
+-    @app.get("/v1/pool")
+-    async def pool_endpoint() -> dict[str, Any]:
++    @app.get("/v1/pool", response_model=None)
++    async def pool_endpoint(request: Request) -> dict[str, Any] | Response:
++        if (denied := _check_http_access(request)) is not None:
++            return denied
+         now = time.monotonic()
+ 
+         def _state(u: PipelineUnit) -> dict[str, Any]:

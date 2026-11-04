@@ -32,6 +32,9 @@ param(
     [int]$MinSilenceMs = 0,   # end-of-turn silence; 0 = upstream default (64 ms)
     [int]$BatchSentences = 0, # TTS starts after N LLM sentences; 0 = upstream default (3)
     [string]$Prompt = "",     # system prompt; empty = upstream default
+    [string]$WsToken = "",    # serve: caller token for the socket + read routes.
+                              # Empty: $env:SPEECH_WS_TOKEN, then the _ws_token file,
+                              # then a generated one (printed at startup).
     [switch]$LowLatency,      # short replies + sentence-by-sentence TTS + faster turn close
     [switch]$EnableLlmProxy,  # serve: expose /v1/chat/completions. Off by default so a
                               # tunnel cannot be used to spend 9router credit on free text.
@@ -241,6 +244,25 @@ if ($systemPrompt) { $cliArgs += @("--init_chat_prompt", $systemPrompt) }
 if ($Mode -eq "serve" -and -not $env:SPEECH_UI_DIR) {
     $ui = Join-Path $PSScriptRoot "ui"
     if (Test-Path (Join-Path $ui "index.html")) { $env:SPEECH_UI_DIR = $ui }
+}
+
+# Caller token. A tunnel publishes the socket to anyone who finds the hostname,
+# and there is no Cloudflare Access in front of it in the "any frontend" setup -
+# so the server checks a shared token itself. Generated once and kept in
+# _ws_token (gitignored) so a restart does not invalidate a deployed frontend.
+if ($Mode -eq "serve") {
+    if (-not $WsToken) { $WsToken = $env:SPEECH_WS_TOKEN }
+    $tokenFile = Join-Path $PSScriptRoot "_ws_token"
+    if (-not $WsToken -and (Test-Path $tokenFile)) { $WsToken = (Get-Content $tokenFile -Raw).Trim() }
+    if (-not $WsToken) {
+        $bytes = New-Object byte[] 24
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $WsToken = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        Set-Content -Path $tokenFile -Value $WsToken -NoNewline -Encoding ascii
+        Write-Host "Generated a caller token -> _ws_token" -ForegroundColor Yellow
+    }
+    $env:SPEECH_WS_TOKEN = $WsToken
+    Write-Host "Token: $WsToken" -ForegroundColor Cyan
 }
 
 # local mode owns the mic; serve mode is headless for other agents

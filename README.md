@@ -325,9 +325,40 @@ socket. The page picks `wss://<host>/v1/realtime` when loaded over HTTPS and
 `ws://<host>:8765/v1/realtime` otherwise — a browser refuses a `ws://` socket
 from an HTTPS page, and the tunnel only publishes one port.
 
-Put Cloudflare Access (or any login) in front of the hostname before publishing
-it. Configuration for this machine is kept in `docs/networking.md`, which is
-gitignored so the hostname stays out of the repo.
+#### Callers from other frontends
+
+The backend is meant to be used by a frontend of your choosing — this repo's
+page, one deployed to Cloudflare Pages, or a native app. Nothing about a
+session is tied to the page, so put the login wherever the frontend is and let
+the backend verify a shared token.
+
+`run.ps1` generates one on first serve mode and keeps it in `_ws_token`
+(gitignored), printing it at startup:
+
+```text
+Token: EXAMPLE-token-shown-at-startup-NOT-this-one
+```
+
+Pass it as `-WsToken` or `$env:SPEECH_WS_TOKEN` to pin one yourself. A caller
+presents it in whichever way its client allows:
+
+| Caller | How |
+|---|---|
+| Browser | `new WebSocket(url, ["realtime", "token.<T>"])` — a browser cannot set headers |
+| `curl` / Python / Go | `Authorization: Bearer <T>`, or `?token=<T>` |
+| This page | `?server=wss://host&token=<T>` (remembered in `localStorage`) |
+
+`/v1/realtime/capabilities` stays open so a frontend can list languages and
+voices before it has anything else; `/v1/pool`, `/v1/usage` and the socket are
+gated. A wrong token closes with `1008` **before** a pipeline slot is claimed,
+so a misconfigured frontend cannot lock a real user out. With no token
+configured at all the server does not check — fine on `127.0.0.1`, not behind a
+tunnel.
+
+This is a shared secret, not per-person identity: anyone holding it is in,
+revoking means changing the token and redeploying the frontend. That is a
+deliberate trade for "easy to connect from any frontend" — see
+`docs/networking.md` for the hostname and the deployment choices.
 
 `make router-low` deliberately omits `--enable_llm_proxy`. With it on,
 `/v1/chat/completions` answers 200 and anyone past the gate could spend the
