@@ -29,7 +29,7 @@ curl http://127.0.0.1:8765/v1/realtime/capabilities
 
 ## 2. Simpan token sebagai environment variable di Pages
 
-Cloudflare Dashboard → **Workers & Pages** → project `bisdig-unikma` →
+Cloudflare Dashboard → **Workers & Pages** → project frontend Anda →
 **Settings → Environment variables** → tambah:
 
 | Nama | Nilai | Tipe |
@@ -162,7 +162,7 @@ persis jalur yang dipakai Pages: subprotocol token, `wss://`, dan CORS untuk
 
 ## 5. Uji
 
-1. Buka `https://bisdig-unikma.pages.dev`, login.
+1. Buka URL Pages Anda, login.
 2. Masuk `/app`, tekan **Mulai bicara**, izinkan mikrofon.
 3. Status harus berubah: `menghubungkan...` → `siap.` → `mendengar...` →
    `berpikir...` → `berbicara...`.
