@@ -12,13 +12,18 @@ Reads the token from _ws_token, the same file run.ps1 generates.
 """
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
 import websockets
 
-HOST = "127.0.0.1:8765"
-URL = f"ws://{HOST}/v1/realtime"
+# S2S_URL points at the bare origin, e.g. wss://host, so the same probe can
+# check the tunnel a frontend will actually use. The read routes are fetched
+# over the same origin, with ws(s) swapped for http(s).
+ORIGIN = os.environ.get("S2S_URL", "http://127.0.0.1:8765").rstrip("/")
+URL = ORIGIN.replace("http", "ws", 1) + "/v1/realtime"
+HTTP = ORIGIN.replace("ws", "http", 1)
 
 
 def token() -> str:
@@ -76,10 +81,10 @@ async def main():
     import requests
 
     for path, want in (("/v1/pool", 401), ("/v1/usage", 401), ("/v1/realtime/capabilities", 200)):
-        r = requests.get(f"http://{HOST}{path}", timeout=10)
+        r = requests.get(f"{HTTP}{path}", timeout=10)
         results.append((f"GET {path}", r.status_code == want, True))
         print(f"GET {path:28s} -> {r.status_code} (want {want})")
-    r = requests.get(f"http://{HOST}/v1/pool", params={"token": tok}, timeout=10)
+    r = requests.get(f"{HTTP}/v1/pool", params={"token": tok}, timeout=10)
     results.append(("GET /v1/pool with token", r.status_code == 200, True))
     print(f"GET /v1/pool with token       -> {r.status_code}")
 
